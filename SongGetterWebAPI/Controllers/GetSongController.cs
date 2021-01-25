@@ -27,13 +27,18 @@ namespace SongGetterWebAPI.Controllers
         }
 
         public async Task<IStreamInfo> QueryLib(string Url)
-        { 
+        {
+            var video = youtube.Videos;
+
+            var metadata = await video.GetAsync(Url);
+            var title = metadata.Title;
+
             var streamManifest = await youtube.Videos.Streams.GetManifestAsync(Url);
             var streamInfo = streamManifest.GetAudioOnly().WithHighestBitrate();
 
             if (streamInfo != null)
             {
-                string path = Path.Combine("C:/Users/jabri_000/source/repos/SongGetterWebAPI/SongGetterWebAPI/tmp", "MAudio.mp3");
+                string path = Path.Combine("C:/Users/jabri_000/source/repos/SongGetterWebAPI/SongGetterWebAPI/tmp", title + ".mp3");
                 Progress<double> prog = new Progress<double>(p => System.Diagnostics.Debug.WriteLine($"Progress updated: {p}"));
                 await youtube.Videos.Streams.DownloadAsync(streamInfo, path, prog);
             }
