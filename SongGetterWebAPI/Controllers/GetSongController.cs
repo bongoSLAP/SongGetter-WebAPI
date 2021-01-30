@@ -8,11 +8,9 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Threading.Tasks;
-using System.Web;
 using System.Web.Http;
 using System.Web.Http.Results;
 using YoutubeExplode;
-using YoutubeExplode.Converter;
 using YoutubeExplode.Videos.Streams;
 
 namespace SongGetterWebAPI.Controllers
@@ -34,7 +32,7 @@ namespace SongGetterWebAPI.Controllers
             var streamInfo = streamManifest.GetAudioOnly().WithHighestBitrate();
 
             PathInfo pathInfo = new PathInfo();
-            pathInfo.FilePath = "C:/Users/jabri_000/source/repos/SongGetterWebAPI/SongGetterWebAPI/tmp";
+            pathInfo.FilePath = @"C:\Users\jabri_000\source\repos\SongGetterWebAPI\SongGetterWebAPI\tmp";
             pathInfo.FileName = title + ".mp3";
 
             if (streamInfo != null)
@@ -53,49 +51,50 @@ namespace SongGetterWebAPI.Controllers
             return pathInfo;
         }
 
-        public async Task<HttpResponseMessage> GetSongFromLib(string Url)
+        public async Task<ResponseMessageResult> GetSongFromLib(string Url)
         {
             var pathInfo = await Task.Run(() => QueryLib(Url));
 
             if (pathInfo.IsError)
             {
-                return Request.CreateResponse(HttpStatusCode.BadRequest);
+                HttpResponseMessage errorResponse = new HttpResponseMessage(HttpStatusCode.BadRequest);
+                ResponseMessageResult errorResult = ResponseMessage(errorResponse);
+                return errorResult;
             }
 
             string fullPath = Path.Combine(pathInfo.FilePath, pathInfo.FileName);
+            System.Diagnostics.Debug.WriteLine("fullPath: ", fullPath);
 
-            //var dataBytes = File.ReadAllBytes(fullPath);
-            //var dataStream = new MemoryStream(dataBytes);
+            byte[] fileBytes = File.ReadAllBytes(fullPath);
+            MemoryStream stream = new MemoryStream(fileBytes);
 
-            using (HttpResponseMessage response = new HttpResponseMessage(HttpStatusCode.OK))
+            HttpResponseMessage response = new HttpResponseMessage(HttpStatusCode.OK)
             {
-                //var filePath = HttpContext.Current.Server
-                //    .MapPath($"~/App_Data{pathInfo.FileName}");
-                var fileBytes = File.ReadAllBytes(fullPath);
-                var fileStream = new MemoryStream(fileBytes);
+                Content = new StreamContent(stream)
+            };
 
-                response.Content = new StreamContent(fileStream);
+            response.Content.Headers.ContentDisposition = new ContentDispositionHeaderValue("attachment")
+            {
+                FileName = pathInfo.FileName
+            };
 
-                var headers = response.Content.Headers;
+            response.Content.Headers.ContentType = new MediaTypeHeaderValue("audio/mpeg");
+            ResponseMessageResult result = ResponseMessage(response);
+
+            /*
+            var headers = response.Content.Headers;
 
                 headers.ContentDisposition = new ContentDispositionHeaderValue("attachment");
                 headers.ContentDisposition.FileName = pathInfo.FileName;
 
                 headers.ContentType = new MediaTypeHeaderValue("audio/mpeg");
 
-                headers.ContentLength = fileStream.Length;
+                headers.ContentLength = stream.Length;
+            */
+
+            return result;
 
 
-                /*
-                response.Content = new StreamContent(dataStream);
-                response.Content.Headers.ContentDisposition = new System.Net.Http.Headers.ContentDispositionHeaderValue("attachment");
-                response.Content.Headers.ContentDisposition.FileName = pathInfo.FileName;
-                response.Content.Headers.ContentType = new MediaTypeHeaderValue("audio/mpeg");
-                */
-
-                System.Diagnostics.Debug.WriteLine("response: ", response);
-                return response;
-            }
         }
     }
 }
