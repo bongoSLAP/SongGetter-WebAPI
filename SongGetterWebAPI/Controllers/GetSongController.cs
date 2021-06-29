@@ -1,9 +1,12 @@
 using SongGetterWebAPI.Models;
 using System;
 using System.IO;
+using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web;
 using System.Web.Http;
@@ -15,31 +18,46 @@ namespace SongGetterWebAPI.Controllers
 {
     public class GetSongController : ApiController
     {
-        YoutubeClient youtube = new YoutubeClient();
+        readonly YoutubeClient youtube = new YoutubeClient();
 
-        private async Task<PathInfo> QueryLib(string Url)
+        private async Task<PathInfo> DownloadVideoAsMp3(string Url, PathInfo pathInfo)
         {
-            YoutubeClient youtube = new YoutubeClient();
-
-            var video = youtube.Videos;
-
-            var metadata = await video.GetAsync(Url);
-            var title = metadata.Title;
-
+            //fetch stream manifest using YoutubeExplode library 
             var streamManifest = await youtube.Videos.Streams.GetManifestAsync(Url);
-            var streamInfo = streamManifest.GetAudioOnly().WithHighestBitrate();
 
-            PathInfo pathInfo = new PathInfo();
-            pathInfo.FilePath = @"C:\Users\jabri_000\source\repos\SongGetterWebAPI\SongGetterWebAPI\App_Data";
-            pathInfo.FileName = title + ".mp3";
+            //get audio as highest bitrate
+
+            var streamInfo = streamManifest.GetAudioOnlyStreams().GetWithHighestBitrate();
+            
 
             if (streamInfo != null)
             {
                 System.Diagnostics.Debug.WriteLine("downloading...");
                 pathInfo.IsError = false;
+
+                //escape illegal chars in filename
+                if (Regex.Match(pathInfo.FileName, @"[:|]").Success) 
+                { 
+                    pathInfo.FileName = Regex.Replace(pathInfo.FileName, @"[:|]", "-"); 
+                }
+               
+                if (Regex.Match(pathInfo.FileName, @"[/?*\\]").Success) 
+                { 
+                    pathInfo.FileName = Regex.Replace(pathInfo.FileName, @"[/?*\\]", " "); 
+                }
+
+                if (pathInfo.FileName.Contains('"')) 
+                { 
+                    pathInfo.FileName = pathInfo.FileName.Replace("\"", "'"); 
+                }
+
+                System.Diagnostics.Debug.WriteLine(pathInfo.FileName, "filename");
+
+                //download video as mp3 using path data, log progress
                 string fullPath = Path.Combine(pathInfo.FilePath, pathInfo.FileName);
-                //Progress<double> prog = new Progress<double>(p => System.Diagnostics.Debug.WriteLine($"Progress updated: {p}"));
-                await youtube.Videos.Streams.DownloadAsync(streamInfo, fullPath/*, prog*/);
+                
+                Progress<double> prog = new Progress<double>(p => System.Diagnostics.Debug.WriteLine($"Progress updated: {p}"));
+                await youtube.Videos.Streams.DownloadAsync(streamInfo, fullPath, prog);
             }
             else
             {
@@ -49,12 +67,72 @@ namespace SongGetterWebAPI.Controllers
             return pathInfo;
         }
 
-        [HttpGet]
-        [Route("api/GetSong")]
-        public async Task<HttpResponseMessage> GetSongFromLib(string Url)
+        private async Task<PathInfo> QueryLib(SongRequest SongRequest)
         {
-            var pathInfo = await Task.Run(() => QueryLib(Url));
+            System.Diagnostics.Debug.WriteLine("executing query lib");
 
+            if (!SongRequest.IsPlaylist)
+            {
+                var video = youtube.Videos;
+
+                //get video title from metadata
+                var metadata = await video.GetAsync(SongRequest.Url);
+                var title = metadata.Title;
+
+                //save filename as title and assign path for video download in project App_Data
+                PathInfo pathInfo = new PathInfo();
+                pathInfo.FilePath = @"C:\Users\jabri_000\source\repos\SongGetterWebAPI\SongGetterWebAPI\App_Data";
+                pathInfo.FileName = title + ".mp3";
+
+                //download video
+                return await Task.Run(() => DownloadVideoAsMp3(SongRequest.Url, pathInfo));
+            }
+            else
+            {
+                //get playlist
+                var playlist = await youtube.Playlists.GetAsync(SongRequest.Url);
+
+                //get playlist title from metadata
+                var playlistTitle = playlist.Title;
+
+                //create directory for folder to store audio files in playlist, call folder the title of playlist 
+                PathInfo playlistPathInfo = new PathInfo();
+                playlistPathInfo.FilePath = Path.Combine(@"C:\Users\jabri_000\source\repos\SongGetterWebAPI\SongGetterWebAPI\App_Data", playlistTitle);
+                Directory.CreateDirectory(playlistPathInfo.FilePath);
+
+                await foreach (var video in youtube.Playlists.GetVideosAsync(playlist.Id))
+                {
+                    //get title of each video, create path using title as filename
+                    var videoTitle = video.Title;
+                    PathInfo videoPathInfo = new PathInfo();
+                    videoPathInfo.FilePath = playlistPathInfo.FilePath;
+                    videoPathInfo.FileName = videoTitle + ".mp3";
+
+                    //download videos
+                    await Task.Run(() => DownloadVideoAsMp3(video.Url, videoPathInfo));
+                }
+
+                //create zip file in App_Data folder using playlist title
+                PathInfo zipPathInfo = new PathInfo();
+                zipPathInfo.FilePath = @"C:\Users\jabri_000\source\repos\SongGetterWebAPI\SongGetterWebAPI\App_Data\Zips";
+                zipPathInfo.FileName = playlistTitle + ".zip";
+
+                //zip file for transmission
+                string sourceDirectory = playlistPathInfo.FilePath;
+                string targetFile = Path.Combine(zipPathInfo.FilePath, zipPathInfo.FileName);
+
+                if (!File.Exists(targetFile))
+                {
+                    await Task.Run(() => ZipFile.CreateFromDirectory(sourceDirectory, targetFile));
+                }
+                return zipPathInfo;
+            }
+        }
+
+        private HttpResponseMessage ConstructResponse(PathInfo pathInfo, string filePath, string ContentType)
+        {
+
+            //if video could not be downloaded (incorrect url?), return error response message
             if (pathInfo.IsError)
             {
                 HttpResponseMessage errorResponse = new HttpResponseMessage(HttpStatusCode.BadRequest);
@@ -63,9 +141,9 @@ namespace SongGetterWebAPI.Controllers
 
             string fullPath = Path.Combine(pathInfo.FilePath, pathInfo.FileName);
 
+            //build response to send to client
             var result = new HttpResponseMessage(HttpStatusCode.OK);
-
-            var filePath = HttpContext.Current.Server.MapPath($"~/App_Data/{pathInfo.FileName}");
+            
             var fileBytes = File.ReadAllBytes(filePath);
             var memoryStream = new MemoryStream(fileBytes);
             result.Content = new StreamContent(memoryStream);
@@ -73,30 +151,45 @@ namespace SongGetterWebAPI.Controllers
             var headers = result.Content.Headers;
             headers.ContentDisposition = new ContentDispositionHeaderValue("attachment");
             headers.ContentDisposition.FileName = pathInfo.FileName;
-            headers.ContentType = new MediaTypeHeaderValue("audio/mpeg");
+            headers.ContentType = new MediaTypeHeaderValue(ContentType);
             headers.ContentLength = memoryStream.Length;
-
-            System.Diagnostics.Debug.WriteLine("sending");
             return result;
         }
 
-        [HttpPost]
-        [Route("api/DeleteAfterDownload")]
-        public IHttpActionResult DeleteAfterDownload([FromBody] PathInfo body)
+        [HttpGet]
+        [Route("api/GetSong")]
+        public async Task<HttpResponseMessage> GetSongFromLib(string Url)
         {
-            System.Diagnostics.Debug.WriteLine(body);
-            try
-            {
-                var path = @"C:\Users\jabri_000\source\repos\SongGetterWebAPI\SongGetterWebAPI\App_Data";
-                var fullPath = Path.Combine(path, body.FileName);
-                File.Delete(fullPath);
-                return Ok();
-            }
-            catch(Exception e)
-            {
-                return Content(HttpStatusCode.BadRequest, e);
-            }
-            
+            System.Diagnostics.Debug.WriteLine("executing GetSongFromLib");
+
+            //instantiate SongRequest class assigning json data sent in GET request from client
+            SongRequest songRequest = new SongRequest();
+            songRequest.Url = Url;
+            songRequest.IsPlaylist = false;
+
+            //create paths, download video(s) from YoutubeExplode library
+            var pathInfo = await Task.Run(() => QueryLib(songRequest));
+
+            var filePath = HttpContext.Current.Server.MapPath($"~/App_Data/{pathInfo.FileName}");
+            return await Task.Run(() => ConstructResponse(pathInfo, filePath, "audio/mpeg"));
+        }
+
+        [HttpGet]
+        [Route("api/GetPlaylist")]
+        public async Task<HttpResponseMessage> GetPlaylistFromLib(string Url)
+        {
+            System.Diagnostics.Debug.WriteLine("executing GetPlaylistFromLib");
+
+            //instantiate SongRequest class assigning json data sent in GET request from client
+            SongRequest songRequest = new SongRequest();
+            songRequest.Url = Url;
+            songRequest.IsPlaylist = true;
+
+            //create paths, download video(s) from YoutubeExplode library
+            var pathInfo = await Task.Run(() => QueryLib(songRequest));
+
+            var filePath = HttpContext.Current.Server.MapPath($"~/App_Data/Zips/{ pathInfo.FileName}");
+            return await Task.Run(() => ConstructResponse(pathInfo, filePath, "application/zip"));
         }
     }
 }

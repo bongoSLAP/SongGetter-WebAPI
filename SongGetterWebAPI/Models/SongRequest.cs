@@ -10,5 +10,7 @@ namespace SongGetterWebAPI.Models
     {
         [JsonProperty(PropertyName = "url")]
         public string Url { get; set; }
+        [JsonProperty(PropertyName = "isPlaylist")]
+        public bool IsPlaylist { get; set; }
     }
 }
